@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Body Measurement System</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f6f9;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 {
+            margin-bottom: 20px;
+        }
+        select, button {
+            padding: 10px;
+            margin: 5px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            width: 100%;
+            max-width: 350px;
+        }
+        button {
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+        }
+       .wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            margin-top: 15px;
+        }
+        video, canvas {
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+            border-radius: 12px;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+       .results {
+            margin-top: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 500px;
+            margin-left: auto;
+            margin-right: auto;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+       .results p {
+            margin: 10px 0;
+            font-size: 18px;
+        }
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>AI Body Measurement System</h1>
+
+    <div class="controls">
+        <select id="cameraSelect"></select>
+        <button onclick="startSelectedCamera()">Start Camera</button>
+    </div>
+
+    <div class="wrapper">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="results">
+        <p>Height: <span id="height">--</span> cm</p>
+        <p>Weight: <span id="weight">--</span> kg</p>
+        <p>BMI: <span id="bmi">--</span></p>
+        <p id="personStatus">No Person Detected</p>
+    </div>
+
+    <div class="status" id="status">Loading...</div>
+
+    <script>
+        let detector;
+        let currentStream;
+        const video = document.getElementById("video");
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+        const cameraSelect = document.getElementById("cameraSelect");
+        const statusEl = document.getElementById("status");
+
+        async function loadModels() {
+            statusEl.innerText = "Loading AI Model...";
+            detector = await poseDetection.createDetector(
+                poseDetection.SupportedModels.MoveNet,
+                { modelType: 'SinglePose.Lightning' }
+            );
+            statusEl.innerText = "AI Model Loaded";
+        }
+
+        async function loadCameras() {
+            try {
+                await navigator.mediaDevices.getUserMedia({ video: true });
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const cameras = devices.filter(device => device.kind === 'videoinput');
+
+                cameraSelect.innerHTML = '';
+                cameras.forEach((camera, index) => {
+                    const option = document.createElement("option");
+                    option.value = camera.deviceId;
+                    option.text = camera.label || `Camera ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+            } catch (err) {
+                statusEl.innerText = "Camera permission denied";
+            }
+        }
+
+        async function startSelectedCamera() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+            const deviceId = cameraSelect.value;
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        deviceId: deviceId? { exact: deviceId } : undefined,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+                currentStream = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    detect();
+                };
+            } catch (error) {
+                alert("Unable to access camera.\n" + error.message);
+            }
+        }
+
+        function estimateHeight(keypoints) {
+            const nose = keypoints[0];
+            const leftAnkle = keypoints[15];
+            const rightAnkle = keypoints[16];
+
+            if (nose.score < 0.3 || leftAnkle.score < 0.3 || rightAnkle.score < 0.3) {
+                return null;
+            }
+
+            const ankleY = (leftAnkle.y + rightAnkle.y) / 2;
+            const pixelHeight = ankleY - nose.y;
+            
+            const estimatedHeight = pixelHeight * 0.35;
+            return Math.round(estimatedHeight);
+        }
+
+        function estimateWeight(height) {
+            
+            const heightInMeters = height / 100;
+            const weight = 23 * (heightInMeters * heightInMeters);
+            return Math.round(weight);
+        }
+
+        function drawPoint(x, y) {
+            ctx.beginPath();
+            ctx.arc(x, y, 5, 0, 2 * Math.PI);
+            ctx.fillStyle = "red";
+            ctx.fill();
+        }
+
+        function drawLine(a, b) {
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "lime";
+            ctx.stroke();
+        }
+
+        function drawSkeleton(pose) {
+            const points = pose.keypoints;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            points.forEach(point => {
+                if (point.score > 0.3) {
+                    drawPoint(point.x, point.y);
+                }
+            });
+
+            const pairs = [
+                [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],
+                [5, 11], [6, 12], [11, 12], [11, 13], [13, 15],
+                [12, 14], [14, 16]
+            ];
+
+            pairs.forEach(pair => {
+                const a = points[pair[0]];
+                const b = points[pair[1]];
+                if (a.score > 0.3 && b.score > 0.3) {
+                    drawLine(a, b);
+                }
+            });
+        }
+
+        async function detect() {
+            if (!detector || video.readyState < 2) {
+                requestAnimationFrame(detect);
+                return;
+            }
+
+            const poses = await detector.estimatePoses(video);
+
+            if (poses.length > 0) {
+                const pose = poses[0];
+                drawSkeleton(pose);
+
+                const height = estimateHeight(pose.keypoints);
+                document.getElementById("personStatus").innerText = "Person Detected";
+
+                if (height && height > 100 && height < 220) {
+                    const weight = estimateWeight(height);
+                    const bmi = (weight / Math.pow(height / 100, 2)).toFixed(1);
+
+                    document.getElementById("height").innerText = height;
+                    document.getElementById("weight").innerText = weight;
+                    document.getElementById("bmi").innerText = bmi;
+                }
+            } else {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                document.getElementById("personStatus").innerText = "No Person Detected";
+                document.getElementById("height").innerText = "--";
+                document.getElementById("weight").innerText = "--";
+                document.getElementById("bmi").innerText = "--";
+            }
+
+            requestAnimationFrame(detect);
+        }
+
+        
+        window.onload = async () => {
+            await loadModels();
+            await loadCameras();
+        };
+    </script>
+</body>
+</html>
